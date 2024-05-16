@@ -12,7 +12,7 @@ const PRIVATE_KEY = process.env.ACC1_PRIVATE_KEY || '';
 const SEND_TRANSACTION_GAS_BUDGET = 15_000_000n;
 const GET_GAS_COINS_GAS_BUDGET = 15_000_000n;
 const GAS_PRICE = 1100n;
-const TPS = 100;
+const TPS = 2;
 const SEQUENT_TXS = 10n;
 const PING_INTERVAL = process.env.PING_INTERVAL * 1000;
 
@@ -57,15 +57,19 @@ const getGasCoins = async ({ suiClient, keyPair }) => {
 const sendTransaction = async ({ suiClient, keyPair, gasCoin }) => {
   const txb = new TransactionBlock();
 
-  // TODO call a fast path module here
-  // create object => delete object
-  // public fun new(ctx: &mut TxContext): Account {}
-  // public fun destroy(self: Account) {}
-
   txb.setSender(keyPair.toSuiAddress());
   txb.setGasBudget(SEND_TRANSACTION_GAS_BUDGET); // Adjust gas budget as necessary
   txb.setGasPrice(GAS_PRICE);
   txb.setGasPayment([gasCoin]);
+
+  const object = txb.moveCall({
+    target: `${USELESS_PKG}::useless::new`,
+  });
+
+  txb.moveCall({
+    target: `${USELESS_PKG}::useless::destroy`,
+    arguments: [object],
+  });
 
   const bytes = await txb.build({ client: suiClient, limits: {} });
 
@@ -75,6 +79,7 @@ const sendTransaction = async ({ suiClient, keyPair, gasCoin }) => {
     transactionBlock: bytes,
     options: { showEffects: true },
   });
+
   return { result, startTime };
 };
 
@@ -102,7 +107,6 @@ const loop = async (data) => {
 const main = async () => {
   let totalGasFees = 0n;
   let totalTransactions = 0;
-  let startTime;
 
   while (true) {
     try {
@@ -111,7 +115,7 @@ const main = async () => {
       log('Gas Coins Created');
 
       const promises = [];
-      startTime = performance.now();
+      const startTime = performance.now();
 
       for (const gas of gasCoins) {
         promises.push(
@@ -147,7 +151,7 @@ const main = async () => {
       const minStartTime = Math.min(...startTimes);
       const maxStartTime = Math.max(...startTimes);
       const timeDelta = maxStartTime - minStartTime;
-      const transactionsPerSecond = fulfilledResults.length / ((timeDelta / 1000) || 1);
+      const transactionsPerSecond = TPS;
 
       const totalGasFeesInSUI = Number(totalGasFees) / 1_000_000_000; // Convert Mist to SUI
 
