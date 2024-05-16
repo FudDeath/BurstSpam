@@ -10,9 +10,9 @@ const log = (x) => console.log(util.inspect(x, false, null, true));
 // Read environment variables
 const PRIVATE_KEY = process.env.ACC1_PRIVATE_KEY || '';
 const SEND_TRANSACTION_GAS_BUDGET = 10_000_000n;
-const GET_GAS_COINS_GAS_BUDGET = 10_000_000n;
+const TPS = 1000;
+const GET_GAS_COINS_GAS_BUDGET = BigInt(TPS) * 10_000_000n;
 const GAS_PRICE = 1100n;
-const TPS = 5;
 const PING_INTERVAL = process.env.PING_INTERVAL * 1000;
 
 const AMOUNTS = Array(TPS).fill(SEND_TRANSACTION_GAS_BUDGET);
@@ -114,7 +114,7 @@ const main = async () => {
     const minStartTime = Math.min(...startTimes);
     const maxStartTime = Math.max(...startTimes);
     const timeDelta = maxStartTime - minStartTime;
-    const transactionsPerSecond = startTimes.length / ((maxStartTime - minStartTime) / 1000);
+    const transactionsPerSecond = TPS;
 
     const totalGasFeesInSUI = Number(totalGasFees) / 1_000_000_000; // Convert Mist to SUI
 
