@@ -2,83 +2,126 @@ import { getFullnodeUrl, SuiClient } from '@mysten/sui.js/client';
 import { TransactionBlock } from '@mysten/sui.js/transactions';
 import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
 import { decodeSuiPrivateKey } from '@mysten/sui.js/cryptography';
-import { getMetricPayload, pushMetrics, sleepAsync } from './common.js';
+import chalk from 'chalk';
+import util from 'util';
 
-const COIN_TRANSFER_LATENCY_METRIC_NAME = "e2e_p2p_txn_latency_sui";
-const COIN_TRANSFER_BUILD_LATENCY_METRIC_NAME = "e2e_p2p_txn_latency_build_sui";
-const COIN_TRANSFER_SUCCESS_METRIC_NAME = COIN_TRANSFER_LATENCY_METRIC_NAME + "_success";
-const CHAIN_NAME = process.env.CHAIN_NAME;
+const log = (x) => console.log(util.inspect(x, false, null, true));
+
+// Read environment variables
+const PRIVATE_KEY = process.env.ACC1_PRIVATE_KEY || '';
+const SEND_TRANSACTION_GAS_BUDGET = 10_000_000n;
+const GET_GAS_COINS_GAS_BUDGET = 10_000_000n;
+const GAS_PRICE = 1100n;
+const TPS = 5;
 const PING_INTERVAL = process.env.PING_INTERVAL * 1000;
-const URL_OVERRIDE = process.env.URL;
-const TOTAL_TRANSACTIONS = 5; // Total number of transactions to send for the test
+
+const AMOUNTS = Array(TPS).fill(SEND_TRANSACTION_GAS_BUDGET);
+
+const suiClient = new SuiClient({ url: process.env.URL_OVERRIDE || getFullnodeUrl('testnet') });
 
 function getKeyPairFromExportedPrivateKey(privateKey) {
   let parsedKeyPair = decodeSuiPrivateKey(privateKey);
   return Ed25519Keypair.fromSecretKey(parsedKeyPair.secretKey);
 }
 
-const sendTransaction = async (suiClient, sender_keypair, receiver_address, gasPrice) => {
+const keyPair = getKeyPairFromExportedPrivateKey(PRIVATE_KEY);
+
+const getGasCoins = async ({ suiClient, keyPair }) => {
   const txb = new TransactionBlock();
-  
-  // Create a single coin split for the transaction
-  const [coin] = txb.splitCoins(txb.gas, [txb.pure(1)]);
-  
-  // Transfer the coin to the receiver
-  txb.transferObjects([coin], receiver_address);
 
-  txb.setSender(sender_keypair.toSuiAddress());
-  txb.setGasBudget(5_000_000);  // Adjust gas budget as necessary
-  txb.setGasPrice(gasPrice);
+  txb.setSender(keyPair.toSuiAddress());
+  txb.setGasBudget(GET_GAS_COINS_GAS_BUDGET); // Adjust gas budget as necessary
+  txb.setGasPrice(GAS_PRICE);
 
-  const buildStartTime = performance.now();
+  const results = txb.splitCoins(txb.gas, AMOUNTS);
+
+  AMOUNTS.forEach((_, index) => {
+    txb.transferObjects([results[index]], keyPair.toSuiAddress());
+  });
+
+  const bytes = await txb.build({ client: suiClient, limits: {} });
+
+  const result = await suiClient.signAndExecuteTransactionBlock({
+    signer: keyPair,
+    transactionBlock: bytes,
+    options: { showEffects: true },
+  });
+
+  return result.effects?.created || [];
+};
+
+const sendTransaction = async ({ suiClient, keyPair, gasCoin }) => {
+  const txb = new TransactionBlock();
+
+  // TODO Call SPAM HERE
+
+  txb.setSender(keyPair.toSuiAddress());
+  txb.setGasBudget(SEND_TRANSACTION_GAS_BUDGET); // Adjust gas budget as necessary
+  txb.setGasPrice(GAS_PRICE);
+  txb.setGasPayment([gasCoin]);
+
   const bytes = await txb.build({ client: suiClient, limits: {} });
 
   const startTime = performance.now();
   const result = await suiClient.signAndExecuteTransactionBlock({
-    signer: sender_keypair,
+    signer: keyPair,
     transactionBlock: bytes,
-    options: { showEffects: true }
+    options: { showEffects: true },
   });
+  return { result, startTime };
+};
 
-  const endTime = performance.now();
-
-  const buildLatency = (startTime - buildStartTime) / 1000;
-  const latency = (endTime - startTime) / 1000;
-  return {
-    result,
-    startTime
-  };
-}
+const sleepAsync = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const main = async () => {
-  const SENDER_PRIVATE_KEY = process.env.ACC1_PRIVATE_KEY;
-  const sender_keypair = getKeyPairFromExportedPrivateKey(SENDER_PRIVATE_KEY);
-  const RECEIVER_PRIVATE_KEY = process.env.ACC2_PRIVATE_KEY || process.env.ACC1_PRIVATE_KEY;
-  const receiver_keypair = getKeyPairFromExportedPrivateKey(RECEIVER_PRIVATE_KEY);
-  const receiver_address = receiver_keypair.getPublicKey().toSuiAddress();
+  let totalGasFees = 0n;
+  let totalTransactions = 0;
+  let startTime;
 
-  let url = getFullnodeUrl('testnet');
-  if (URL_OVERRIDE) {
-      url = URL_OVERRIDE;
-  }
-  const suiClient = new SuiClient({ url: url });
-  const gasPrice = await suiClient.getReferenceGasPrice();
+  while (true) {
+    const gasCoins = await getGasCoins({ suiClient, keyPair });
 
-  try {
     const promises = [];
-    for (let i = 0; i < TOTAL_TRANSACTIONS; i++) {
-      promises.push(sendTransaction(suiClient, sender_keypair, receiver_address, gasPrice));
+    startTime = performance.now();
+
+    for (const gas of gasCoins) {
+      promises.push(
+        sendTransaction({ suiClient, keyPair, gasCoin: gas.reference })
+      );
     }
 
-    // Wait for all transactions to be submitted
-    const results = await Promise.all(promises);
+    const results = await Promise.allSettled(promises);
 
-    // Print results with confirmation and submission time
-    results.forEach((result, index) => {
-      console.log(`Transaction ${index + 1} submitted at ${new Date(result.startTime).toISOString()} confirmation result:`, result.result);
+    // Extracting and logging the necessary information
+    const startTimes = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => result.value.startTime);
+
+    startTimes.forEach((startTime, index) => {
+      const date = new Date(startTime);
+      const formattedTime = `${date.getMinutes()}:${date.getSeconds()}.${date.getMilliseconds().toString().padStart(3, '0')}`;
+      const result = results[index];
+      const confirmed = result.value.result.effects.status.status === 'success';
+      const digest = result.value.result.digest;
+      console.log(`Transaction ${index + 1} submitted at ${formattedTime} - Confirmation: ${confirmed}, Digest: ${digest}`);
+      if (confirmed) {
+        totalGasFees += BigInt(result.value.result.effects.gasUsed.computationCost) +
+                        BigInt(result.value.result.effects.gasUsed.storageCost) -
+                        BigInt(result.value.result.effects.gasUsed.storageRebate);
+      }
     });
-  } catch (error) {
-    console.log('Error:', error.message);
+
+    const minStartTime = Math.min(...startTimes);
+    const maxStartTime = Math.max(...startTimes);
+    const timeDelta = maxStartTime - minStartTime;
+    const transactionsPerSecond = startTimes.length / ((maxStartTime - minStartTime) / 1000);
+
+    const totalGasFeesInSUI = Number(totalGasFees) / 1_000_000_000; // Convert Mist to SUI
+
+    console.log(chalk.blue(`Time delta between first and last transaction:`) + chalk.green(` ${timeDelta} milliseconds`));
+    console.log(chalk.blue(`Total gas fees:`) + chalk.green(` ${totalGasFeesInSUI} SUI, Transactions per second:`) + chalk.green(` ${transactionsPerSecond}`));
+
+    await sleepAsync(PING_INTERVAL);
   }
 };
 
