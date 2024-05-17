@@ -1,3 +1,3 @@
 To run:
 
-CHAIN_NAME=testnet PING_INTERVAL=1000 ACC1_PRIVATE_KEY=suiprivkey1 ACC2_PRIVATE_KEY=suiprivkey1 URL_OVERRIDE=https://suins-rpc.testnet.sui.io/ node index.js
+CHAIN_NAME=testnet PING_INTERVAL=100 ACC1_PRIVATE_KEY=suiprivkey1 ACC2_PRIVATE_KEY=suiprivkey1qq URL_OVERRIDE1=https://suins-rpc.testnet.sui.io URL_OVERRIDE2=https://testnet.suiet.app  node index.js
