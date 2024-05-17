@@ -8,17 +8,15 @@ import chalk from 'chalk';
 
 const log = (x) => console.log(util.inspect(x, false, null, true));
 
-// TODO SET THESE. Increase the budget and price if needed.
 const PRIVATE_KEYS = [process.env.ACC1_PRIVATE_KEY || '', process.env.ACC2_PRIVATE_KEY || ''];
 const RPC_URLS = [process.env.URL_OVERRIDE1 || getFullnodeUrl('testnet'), process.env.URL_OVERRIDE2 || getFullnodeUrl('testnet')];
 const SEND_TRANSACTION_GAS_BUDGET = 15_000_000n;
-const TPS = 120;
-const GET_GAS_COINS_GAS_BUDGET = BigInt(TPS)*15_000_000n;
+const TPS = 125;
+const GET_GAS_COINS_GAS_BUDGET = BigInt(TPS) * 15_000_000n;
 const GAS_PRICE = 1100n;
 const SEQUENT_TXS = 1n;
 const PING_INTERVAL = (process.env.PING_INTERVAL || 60) * 1000;
 const USELESS_PKG = '0xcd7af24572133a6772fae2867d37dd65f817da917cb44a056ec38743211f66cc';
-
 const AMOUNTS = Array(TPS).fill(SEND_TRANSACTION_GAS_BUDGET * SEQUENT_TXS);
 
 function getKeyPairFromExportedPrivateKey(privateKey) {
@@ -41,7 +39,7 @@ const getGasCoins = async ({ suiClient, keyPair }) => {
   const txb = new TransactionBlock();
 
   txb.setSender(keyPair.toSuiAddress());
-  txb.setGasBudget(GET_GAS_COINS_GAS_BUDGET); // Adjust gas budget as necessary
+  txb.setGasBudget(GET_GAS_COINS_GAS_BUDGET);
   txb.setGasPrice(GAS_PRICE);
 
   const results = txb.splitCoins(
@@ -68,7 +66,7 @@ const prepareTransaction = async ({ suiClient, keyPair, gasCoin }) => {
   const txb = new TransactionBlock();
 
   txb.setSender(keyPair.toSuiAddress());
-  txb.setGasBudget(SEND_TRANSACTION_GAS_BUDGET); // Adjust gas budget as necessary
+  txb.setGasBudget(SEND_TRANSACTION_GAS_BUDGET);
   txb.setGasPrice(GAS_PRICE);
   txb.setGasPayment([gasCoin]);
 
@@ -105,73 +103,63 @@ const sendPreparedTransaction = async ({ suiClient, keyPair, transactionBlock })
   }
 };
 
-const run = async ({ suiClient, keyPair, gasCoins, startSignal }) => {
-  let totalGasFees = 0n;
-  let totalTransactions = 0;
+const formatTimestamp = (timestamp) => {
+  const date = new Date(timestamp);
+  return `${date.getMinutes()}:${date.getSeconds()}.${date.getMilliseconds().toString().padStart(3, '0')}`;
+};
 
-  // Wait for the signal to start
+const run = async ({ suiClients, gasCoinsArrays, startSignal }) => {
   await startSignal;
 
   const preparedTransactions = await Promise.all(
-    gasCoins.map(gasCoin =>
-      prepareTransaction({ suiClient, keyPair, gasCoin: gasCoin.reference })
+    suiClients.flatMap(({ suiClient, keyPair }, index) =>
+      gasCoinsArrays[index].map(gasCoin =>
+        prepareTransaction({ suiClient, keyPair, gasCoin: gasCoin.reference })
+      )
     )
   );
 
+  console.log(chalk.red('Starting transactions'));
+
   while (true) {
-    try {
-      log('Starting transactions');
+    const promises = preparedTransactions.map((tx, index) => {
+      const { suiClient, keyPair } = suiClients[Math.floor(index / gasCoinsArrays[0].length)];
+      return sendPreparedTransaction({ suiClient, keyPair, transactionBlock: tx });
+    });
 
-      const promises = preparedTransactions.map(tx =>
-        sendPreparedTransaction({ suiClient, keyPair, transactionBlock: tx })
-      );
+    const results = await Promise.allSettled(promises);
 
-      const results = await Promise.allSettled(promises);
-
-      const fulfilledResults = results.filter(result => result.status === 'fulfilled' && result.value.success);
-      if (fulfilledResults.length === 0) {
-        console.log(chalk.blue('No transactions were successfully submitted.'));
-        await new Promise(resolve => setTimeout(resolve, PING_INTERVAL));
-        continue;
-      }
-
-      const startTimes = fulfilledResults.map(result => result.value.startTime);
-      const endTimes = fulfilledResults.map(result => result.value.endTime);
-      const latencies = fulfilledResults.map(result => result.value.latency);
-
-      startTimes.forEach((startTime, index) => {
-        const date = new Date(startTime);
-        const formattedStartTime = `${date.getMinutes()}:${date.getSeconds()}.${date.getMilliseconds().toString().padStart(3, '0')}`;
-        const result = fulfilledResults[index].value.result;
-        const confirmed = result.effects.status.status === 'success';
-        const digest = result.digest;
-        const endTime = new Date(endTimes[index]);
-        const formattedEndTime = `${endTime.getMinutes()}:${endTime.getSeconds()}.${endTime.getMilliseconds().toString().padStart(3, '0')}`;
-        console.log(`Transaction ${index + 1} submitted at ${formattedStartTime} - Confirmed at ${formattedEndTime} - Confirmation: ${confirmed}, Digest: ${digest}`);
-        if (confirmed) {
-          totalGasFees += BigInt(result.effects.gasUsed.computationCost) +
-                          BigInt(result.effects.gasUsed.storageCost) -
-                          BigInt(result.effects.gasUsed.storageRebate);
-        }
-      });
-
-      const minStartTime = Math.min(...startTimes);
-      const maxStartTime = Math.max(...startTimes);
-      const timeDelta = maxStartTime - minStartTime;
-      const transactionsPerSecond = TPS;
-      const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
-
-      const totalGasFeesInSUI = Number(totalGasFees) / 1_000_000_000; // Convert Mist to SUI
-
-      console.log(chalk.blue(`Time delta between first and last transaction:`) + chalk.green(` ${timeDelta} milliseconds`));
-      console.log(chalk.blue(`Total gas fees:`) + chalk.green(` ${totalGasFeesInSUI} SUI, Transactions per second:`) + chalk.green(` ${transactionsPerSecond}`));
-      console.log(chalk.blue(`Average transaction latency:`) + chalk.green(` ${avgLatency} seconds`));
-
+    const fulfilledResults = results.filter(result => result.status === 'fulfilled' && result.value.success);
+    if (fulfilledResults.length === 0) {
+      console.log(chalk.blue('No transactions were successfully submitted.'));
       await new Promise(resolve => setTimeout(resolve, PING_INTERVAL));
-    } catch (e) {
-      log(e);
-      await new Promise(resolve => setTimeout(resolve, PING_INTERVAL));
+      continue;
     }
+
+    fulfilledResults.forEach((result, index) => {
+      const { startTime, endTime, result: txResult } = result.value;
+      const formattedStartTime = formatTimestamp(startTime);
+      const formattedEndTime = formatTimestamp(endTime);
+      const confirmed = txResult.effects.status.status === 'success';
+      const digest = txResult.digest;
+      console.log(`Transaction ${index + 1} submitted at ${formattedStartTime} - Confirmed at ${formattedEndTime} - Confirmation: ${confirmed}, Digest: ${digest}`);
+    });
+
+    const startTimes = fulfilledResults.map(result => result.value.startTime);
+    const endTimes = fulfilledResults.map(result => result.value.endTime);
+    const latencies = fulfilledResults.map(result => result.value.latency);
+
+    const minStartTime = Math.min(...startTimes);
+    const maxStartTime = Math.max(...startTimes);
+    const timeDelta = maxStartTime - minStartTime;
+    const transactionsPerSecond = fulfilledResults.length / (timeDelta / 1000);
+    const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+
+    console.log(chalk.blue(`Time delta between first and last transaction:`) + chalk.green(` ${timeDelta} milliseconds`));
+    console.log(chalk.blue(`Transactions per second:`) + chalk.green(` ${transactionsPerSecond}`));
+    console.log(chalk.blue(`Average transaction latency:`) + chalk.green(` ${avgLatency} seconds`));
+
+    await new Promise(resolve => setTimeout(resolve, PING_INTERVAL));
   }
 };
 
@@ -189,22 +177,20 @@ const main = async () => {
     return { suiClient, keyPair };
   });
 
-  // Prepare start signal
   let start;
   const startSignal = new Promise(resolve => {
     start = resolve;
   });
 
-  // Ensure both clients have sufficient gas coins before starting
   const gasCoinsArrays = await Promise.all(suiClients.map(({ suiClient, keyPair }) => getGasCoins({ suiClient, keyPair })));
 
-  // Run both clients concurrently with pre-created gas coins
-  const runPromises = suiClients.map(({ suiClient, keyPair }, index) => run({ suiClient, keyPair, gasCoins: gasCoinsArrays[index], startSignal }));
+  // Ensure both clients are ready and synchronized
+  const runPromise = run({ suiClients, gasCoinsArrays, startSignal });
 
-  // Trigger the start signal
-  start();
+  // Trigger the start signal simultaneously
+  setTimeout(start, 0);
 
-  await Promise.all(runPromises);
+  await runPromise;
 };
 
 main();
